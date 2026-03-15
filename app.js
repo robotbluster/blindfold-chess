@@ -855,6 +855,7 @@ async function startRecording() {
     // Capture raw PCM at 16kHz — bypasses MediaRecorder encoding/decoding entirely
     micStream   = await navigator.mediaDevices.getUserMedia({ audio: true });
     micAudioCtx = new AudioContext({ sampleRate: 16000 });
+    await micAudioCtx.resume(); // ensure context is not suspended
     micSource   = micAudioCtx.createMediaStreamSource(micStream);
     micProcessor = micAudioCtx.createScriptProcessor(4096, 1, 1);
     pcmChunks   = [];
@@ -897,17 +898,30 @@ async function stopAndProcess() {
     aiThinking = false; updateMicUI(); return;
   }
 
-  // Merge all chunks into one Float32Array and pass directly to Whisper
+  // Merge all chunks into one Float32Array
   const totalLen = chunks.reduce((s, c) => s + c.length, 0);
   const float32  = new Float32Array(totalLen);
   let offset = 0;
   for (const chunk of chunks) { float32.set(chunk, offset); offset += chunk.length; }
 
-  console.log('[Mic] Duration:', (totalLen / 16000).toFixed(1), 's');
+  // Check audio level
+  let maxAmp = 0;
+  for (let i = 0; i < float32.length; i++) if (Math.abs(float32[i]) > maxAmp) maxAmp = Math.abs(float32[i]);
+  console.log('[Mic] Duration:', (totalLen / 16000).toFixed(1), 's | Max amplitude:', maxAmp.toFixed(4));
+
+  if (maxAmp < 0.001) {
+    addChatMessage('ai', 'Mic captured silence. Check your microphone is not muted.');
+    aiThinking = false; updateMicUI(); return;
+  }
+
+  // Normalize so Whisper can hear it clearly
+  const normalized = new Float32Array(totalLen);
+  for (let i = 0; i < float32.length; i++) normalized[i] = float32[i] / maxAmp * 0.9;
+
   addChatMessage('system', 'Transcribing…');
 
   try {
-    const result     = await whisperPipeline(float32, { sampling_rate: 16000, language: 'english', task: 'transcribe' });
+    const result     = await whisperPipeline(normalized, { sampling_rate: 16000, language: 'english', task: 'transcribe' });
     const transcript = result.text?.trim();
     console.log('[Whisper] Transcript:', transcript);
     removeSystemMessages();
